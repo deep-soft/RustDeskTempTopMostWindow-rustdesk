@@ -41,10 +41,39 @@ const TCHAR* WindowTitle = _T("RustDeskPrivacyWindow");
 const TCHAR* ClassName = _T("RustDeskPrivacyWindowClass");
 const TCHAR* DefaultBmpPath = _T("C:\\aa.bmp");
 
+typedef enum tagDWMWINDOWATTRIBUTE {
+	DWMWA_NCRENDERING_ENABLED,
+	DWMWA_NCRENDERING_POLICY,
+	DWMWA_TRANSITIONS_FORCEDISABLED,
+	DWMWA_ALLOW_NCPAINT,
+	DWMWA_CAPTION_BUTTON_BOUNDS,
+	DWMWA_NONCLIENT_RTL_LAYOUT,
+	DWMWA_FORCE_ICONIC_REPRESENTATION,
+	DWMWA_FLIP3D_POLICY,
+	DWMWA_EXTENDED_FRAME_BOUNDS,
+	DWMWA_HAS_ICONIC_BITMAP,
+	DWMWA_DISALLOW_PEEK,
+	DWMWA_EXCLUDED_FROM_PEEK,
+	DWMWA_CLOAK,
+	DWMWA_CLOAKED,
+	DWMWA_FREEZE_REPRESENTATION,
+	DWMWA_PASSIVE_UPDATE_MODE,
+	DWMWA_USE_HOSTBACKDROPBRUSH,
+	DWMWA_USE_IMMERSIVE_DARK_MODE = 20,
+	DWMWA_WINDOW_CORNER_PREFERENCE = 33,
+	DWMWA_BORDER_COLOR,
+	DWMWA_CAPTION_COLOR,
+	DWMWA_TEXT_COLOR,
+	DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+	DWMWA_SYSTEMBACKDROP_TYPE,
+	DWMWA_LAST,
+} DWMWINDOWATTRIBUTE;
+
 typedef HWND(WINAPI* CreateWindowInBand)(_In_ DWORD dwExStyle, _In_opt_ ATOM atom, _In_opt_ LPCWSTR lpWindowName, _In_ DWORD dwStyle, _In_ int X, _In_ int Y, _In_ int nWidth, _In_ int nHeight, _In_opt_ HWND hWndParent, _In_opt_ HMENU hMenu, _In_opt_ HINSTANCE hInstance, _In_opt_ LPVOID lpParam, DWORD band);
 typedef BOOL(WINAPI* SetWindowBand)(HWND hWnd, HWND hwndInsertAfter, DWORD dwBand);
 typedef BOOL(WINAPI* GetWindowBand)(HWND hWnd, PDWORD pdwBand);
 typedef HDWP(WINAPI* DeferWindowPosAndBand)(_In_ HDWP hWinPosInfo, _In_ HWND hWnd, _In_opt_ HWND hWndInsertAfter, _In_ int x, _In_ int y, _In_ int cx, _In_ int cy, _In_ UINT uFlags, DWORD band, DWORD pls);
+typedef HRESULT(WINAPI* DwmSetWindowAttribute)(HWND hwnd, DWMWINDOWATTRIBUTE dwAttribute, LPCVOID pvAttribute, DWORD cbAttribute);
 
 typedef BOOL(WINAPI* SetBrokeredForeground)(HWND hWnd);
 
@@ -68,6 +97,13 @@ VOID OnPaintGdi(HWND hwnd, HDC hdc);
 // https://faithlife.codes/blog/2008/09/displaying_a_splash_screen_with_c_part_i/
 // https://stackoverflow.com/a/66238748/1926020
 VOID OnPaintGdiPlus(HWND hwnd, HDC hdc);
+
+BOOL IsWindowsVersionOrGreater(
+	DWORD os_major,
+	DWORD os_minor,
+	DWORD build_number,
+	WORD service_pack_major,
+	WORD service_pack_minor);
 
 
 LRESULT CALLBACK TrashParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -284,6 +320,26 @@ HWND CreateWin(HMODULE hModule, UINT zbid, const TCHAR* title, const TCHAR* clas
 	return hwnd;
 }
 
+// https://github.com/killtimer0/uiaccess/issues/3#issuecomment-1787022010
+HRESULT CloakWindow(HWND hwnd, BOOL cloakHwnd) {
+	HRESULT result;
+	HMODULE hMod = LoadLibrary(TEXT("dwmapi.dll"));
+	if (hMod) {
+		DwmSetWindowAttribute pDwmSetWindowAttribute = (DwmSetWindowAttribute)GetProcAddress(hMod, "DwmSetWindowAttribute");
+		if (pDwmSetWindowAttribute) {
+			result = pDwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloakHwnd, sizeof(cloakHwnd));
+		}
+		else {
+			result = HRESULT_FROM_WIN32(GetLastError());
+		}
+		FreeLibrary(hMod);
+	}
+	else {
+		result = HRESULT_FROM_WIN32(GetLastError());
+	}
+	return result;
+}
+
 DWORD WINAPI UwU(LPVOID lpParam)
 {
 #ifdef WINDOWINJECTION_EXPORTS
@@ -305,6 +361,13 @@ DWORD WINAPI UwU(LPVOID lpParam)
 	if (!g_hwnd)
 	{
 		return 0;
+	}
+
+	(void)CloakWindow(g_hwnd, TRUE);
+	// Hard code "exclude from capture"
+	if (IsWindowsVersionOrGreater(10, 0, 19041, 0, 0) == TRUE)
+	{
+		(void)SetWindowDisplayAffinity(g_hwnd, WDA_EXCLUDEFROMCAPTURE);
 	}
 
 	RECT rcClient;
@@ -476,3 +539,38 @@ int main(int argc, char* argv[])
 }
 
 #endif
+
+// https://github.com/nodejs/node-convergence-archive/blob/e11fe0c2777561827cdb7207d46b0917ef3c42a7/deps/uv/src/win/util.c#L780
+BOOL IsWindowsVersionOrGreater(
+	DWORD os_major,
+	DWORD os_minor,
+	DWORD build_number,
+	WORD service_pack_major,
+	WORD service_pack_minor)
+{
+	OSVERSIONINFOEX osvi;
+	DWORDLONG condition_mask = 0;
+	int op = VER_GREATER_EQUAL;
+
+	/* Initialize the OSVERSIONINFOEX structure. */
+	ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
+	osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
+	osvi.dwMajorVersion = os_major;
+	osvi.dwMinorVersion = os_minor;
+	osvi.dwBuildNumber = build_number;
+	osvi.wServicePackMajor = service_pack_major;
+	osvi.wServicePackMinor = service_pack_minor;
+
+	/* Initialize the condition mask. */
+	VER_SET_CONDITION(condition_mask, VER_MAJORVERSION, op);
+	VER_SET_CONDITION(condition_mask, VER_MINORVERSION, op);
+	VER_SET_CONDITION(condition_mask, VER_SERVICEPACKMAJOR, op);
+	VER_SET_CONDITION(condition_mask, VER_SERVICEPACKMINOR, op);
+
+	/* Perform the test. */
+	return VerifyVersionInfo(
+		&osvi,
+		VER_MAJORVERSION | VER_MINORVERSION |
+		VER_SERVICEPACKMAJOR | VER_SERVICEPACKMINOR,
+		condition_mask);
+}
